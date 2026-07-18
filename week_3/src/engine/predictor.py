@@ -24,7 +24,8 @@ def build_predictor(model_cfg, ckpt_path):
     Returns:
         SAM2VideoPredictor: Predictor ready for init_state.
     """
-    pass
+    return build_sam2_video_predictor(model_cfg, ckpt_path, device="cuda")
+
 
 
 def build_image_predictor(model_cfg, ckpt_path):
@@ -42,7 +43,8 @@ def build_image_predictor(model_cfg, ckpt_path):
     Returns:
         SAM2ImagePredictor
     """
-    pass
+    sam_model = build_sam2(model_cfg, ckpt_path, device="cuda")
+    return SAM2ImagePredictor(sam_model)
 
 
 def init_state(predictor, frames_dir):
@@ -65,4 +67,8 @@ def init_state(predictor, frames_dir):
     Returns:
         dict: SAM 2 inference state (opaque — pass directly to propagate).
     """
-    pass
+    return predictor.init_state(
+        video_path=str(frames_dir),
+        offload_video_to_cpu=True,   # mandatory on 8 GB VRAM
+        offload_state_to_cpu=True,   # mandatory on 8 GB VRAM
+    )
