@@ -29,7 +29,14 @@ def _load_predictor(cfg, lora_path=None):
     Returns:
         SAM2VideoPredictor (with LoRA weights loaded if lora_path given).
     """
-    pass
+    predictor = build_predictor(cfg["model"]["cfg"], cfg["model"]["ckpt"])
+    
+    if lora_path is not None and Path(lora_path).exists():
+        adapter = torch.load(lora_path, map_location="cuda")
+        predictor.model.image_encoder.load_state_dict(adapter, strict=False)
+        print(f"Loaded LoRA adapter from {lora_path}")
+        
+    return predictor
 
 
 def evaluate_organ(cfg, organ_id, lora_path=None):
@@ -93,7 +100,83 @@ def evaluate_organ(cfg, organ_id, lora_path=None):
         list[dict]: One dict per processed val case with keys:
                     case, dsc_zs, hd95_zs, dsc_lora, hd95_lora.
     """
-    pass
+    pred_zs = build_predictor(cfg)
+    pred_lora = None
+    if lora_path is not None:
+        pred_lora = build_predictor(cfg, ckpt_path=lora_path) 
+        
+    results = []
+    
+    val_cases = cfg.get("val_cases", [])
+    
+    for case in val_cases:
+        img_path = Path(cfg["data_dir"]) / "imagesTr" / f"{case}.nii"
+        lbl_path = Path(cfg["data_dir"]) / "labelsTr" / f"{case}.nii"
+        frames_dir = Path(cfg["output_dir"]) / "frames" / case
+        out_dir = Path(cfg["output_dir"]) / "results" / case
+        
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        write_frames_png(img_path, frames_dir)
+        
+        vol, _ = load_volume(img_path)
+        lbl, spacing = load_volume(lbl_path)
+        
+        vol = apply_hu_window(vol, window_min=-125, window_max=275) 
+        
+        gt3d = (lbl == organ_id).astype(np.uint8)
+
+        start_z = best_start_slice(lbl, organ_id)
+        
+        if start_z is None:
+            continue
+            
+        gt_slice = (lbl[:, :, start_z] == organ_id).astype(np.uint8)
+        bbox = bbox_from_mask(gt_slice, pad=4)
+        
+        if bbox is None:
+            continue
+
+        state_zs = init_state(pred_zs, str(frames_dir))
+        mask_zs  = propagate_bidirectional(
+            pred_zs, 
+            state_zs, 
+            start_z, 
+            bbox,
+            target_hw=(vol.shape[0], vol.shape[1])
+        )
+        dsc_zs = dice_score(mask_zs, gt3d)
+        hd_zs  = hd95(mask_zs, gt3d, spacing)
+        
+
+        if pred_lora is not None:
+            state_lo = init_state(pred_lora, str(frames_dir))
+            mask_lo  = propagate_bidirectional(
+                pred_lora, 
+                state_lo, 
+                start_z, 
+                bbox,
+                target_hw=(vol.shape[0], vol.shape[1])
+            )
+            dsc_lo = dice_score(mask_lo, gt3d)
+            hd_lo  = hd95(mask_lo, gt3d, spacing)
+            
+            # save_gif(mask_lo, out_dir / f"lora_{organ_id}.gif")
+        else:
+            dsc_lo = float("nan")
+            hd_lo  = float("nan")
+
+        # g. Append results
+        results.append(dict(
+            case=case, 
+            dsc_zs=dsc_zs, 
+            hd95_zs=hd_zs, 
+            dsc_lora=dsc_lo, 
+            hd95_lora=hd_lo
+        ))
+        
+    return results
 
 
 def print_table(rows, organ_id):
@@ -122,4 +205,39 @@ def print_table(rows, organ_id):
     Returns:
         dict: Aggregated metric statistics.
     """
-    pass
+    dsc_zs = [r.get("dsc_zs", np.nan) for r in rows]
+    hd95_zs = [r.get("hd95_zs", np.nan) for r in rows]
+    dsc_lora = [r.get("dsc_lora", np.nan) for r in rows]
+    hd95_lora = [r.get("hd95_lora", np.nan) for r in rows]
+    
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        
+        dsc_zs_m, dsc_zs_s = np.nanmean(dsc_zs), np.nanstd(dsc_zs)
+        hd95_zs_m, hd95_zs_s = np.nanmean(hd95_zs), np.nanstd(hd95_zs)
+        
+        dsc_lo_m, dsc_lo_s = np.nanmean(dsc_lora), np.nanstd(dsc_lora)
+        hd95_lo_m, hd95_lo_s = np.nanmean(hd95_lora), np.nanstd(hd95_lora)
+        
+    n = len(rows)
+
+    print("=" * 60)
+    print(f"  Organ {organ_id}  |  {n} val cases")
+    print("=" * 60)
+    print("  Metric         Zero-shot           LoRA")
+    print("  " + "-" * 50)
+    print(f"  DSC            {dsc_zs_m:.3f} ± {dsc_zs_s:.3f}   {dsc_lo_m:.3f} ± {dsc_lo_s:.3f}")
+    print(f"  HD95 (mm)      {hd95_zs_m:.1f}  ± {hd95_zs_s:.1f}   {hd95_lo_m:.1f}  ± {hd95_lo_s:.1f}")
+    print("=" * 60)
+
+    return {
+        "organ": organ_id,
+        "dsc_zs_mean": dsc_zs_m,
+        "dsc_zs_std": dsc_zs_s,
+        "dsc_lora_mean": dsc_lo_m,
+        "dsc_lora_std": dsc_lo_s,
+        "hd95_zs_mean": hd95_zs_m,
+        "hd95_zs_std": hd95_zs_s,
+        "hd95_lora_mean": hd95_lo_m,
+        "hd95_lora_std": hd95_lo_s,
+    }
