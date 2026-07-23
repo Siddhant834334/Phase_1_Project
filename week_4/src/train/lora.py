@@ -24,7 +24,16 @@ def add_lora_peft(image_encoder, r=8, alpha=16):
     Returns:
         image_encoder wrapped with peft LoRA adapters (modified in-place).
     """
-    pass
+    config = LoraConfig(
+        r=r,
+        lora_alpha=alpha,
+        target_modules=["qkv"],
+        lora_dropout=0.05,
+        bias="none"
+    )
+    lora_model = get_peft_model(image_encoder, config)
+     
+    return lora_model
 
 
 # ── Option B — custom Q & V only (stretch goal, no peft dependency) ──────────
@@ -100,4 +109,8 @@ def trainable_report(model):
     Args:
         model: Any nn.Module (typically predictor.model after LoRA injection).
     """
-    pass
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    pct = (trainable / total * 100) if total > 0 else 0.0
+    
+    print(f"Trainable: {trainable:,} / {total:,} = {pct:.3f}%")

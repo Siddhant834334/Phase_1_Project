@@ -68,7 +68,43 @@ def forward_prompted(model, img_t_norm, box_batch, image_size):
     Returns:
         Tensor: (B, H, W) logit tensor with gradient attached.
     """
-    pass
+    B = img_t_norm.shape[0]
+    
+    backbone_out = model.forward_image(img_t_norm)
+    
+  
+    _, vision_feats, _, _ = model._prepare_backbone_features(backbone_out)
+    
+    image_embed = vision_feats[-1]
+    high_res_feats = vision_feats[:-1]
+    
+
+    box_t = box_batch.to(img_t_norm.device).view(B, 1, 4)
+    
+    sparse_emb, dense_emb = model.sam_prompt_encoder(
+        points=None, boxes=box_t, masks=None
+    )
+
+    dec_kwargs = dict(
+        image_embeddings=image_embed,
+        image_pe=model.sam_prompt_encoder.get_dense_pe(),
+        sparse_prompt_embeddings=sparse_emb,
+        dense_prompt_embeddings=dense_emb,
+        multimask_output=False,
+        repeat_image=False,
+    )
+    
+    if high_res_feats:
+        dec_kwargs["high_res_features"] = high_res_feats
+        
+    low_res_masks = model.sam_mask_decoder(**dec_kwargs)[0]  # (B, 1, h, w)
+
+    return F.interpolate(
+        low_res_masks, 
+        (image_size, image_size),
+        mode="bilinear", 
+        align_corners=False
+    ).squeeze(1)
 
 
 def lora_state_dict(model):
@@ -88,7 +124,10 @@ def lora_state_dict(model):
     Returns:
         dict: Filtered state dict containing only LoRA weight tensors.
     """
-    pass
+    return {
+        k: v for k, v in model.image_encoder.state_dict().items()
+        if ".A" in k or ".B" in k or "lora_A" in k or "lora_B" in k
+    }
 
 
 def run_training(cfg, model, dataset, organ_id, save_path):
@@ -146,4 +185,64 @@ def run_training(cfg, model, dataset, organ_id, save_path):
     Returns:
         list[float]: Mean training loss per epoch.
     """
-    pass
+    device = torch.device(cfg["train"].get("device", "cuda"))
+    model.to(device)
+    model.train()
+    
+    loader = DataLoader(
+        dataset, 
+        batch_size=cfg["train"]["batch_size"], 
+        shuffle=True, 
+        num_workers=cfg["train"].get("num_workers", 2)
+    )
+    
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(
+        trainable_params, 
+        lr=cfg["train"]["lr"], 
+        weight_decay=cfg["train"].get("weight_decay", 1e-4)
+    )
+    
+    scaler = torch.cuda.amp.GradScaler(enabled=cfg["train"]["amp"])
+    
+    mean_losses = []
+    
+    for epoch in range(cfg["train"]["epochs"]):
+        epoch_loss = 0.0
+        
+        opt.zero_grad(set_to_none=True)
+        
+        for step, (img, gt, box) in enumerate(loader):
+            
+            img_t = _normalize(img.permute(0, 3, 1, 2).float().to(device))
+            gt    = gt.to(device, dtype=torch.float32)
+            box   = box.to(device)
+
+            
+            with torch.cuda.amp.autocast(enabled=cfg["train"]["amp"], dtype=torch.bfloat16):
+                logits = forward_prompted(model, img_t, box, cfg["model"]["image_size"])
+                loss   = total_loss(logits, gt) / cfg["train"]["accum_steps"]
+                
+            scaler.scale(loss).backward()
+            
+            if (step + 1) % cfg["train"]["accum_steps"] == 0:
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
+            
+            epoch_loss += loss.item() * cfg["train"]["accum_steps"]
+            
+        if len(loader) % cfg["train"]["accum_steps"] != 0:
+            scaler.step(opt)
+            scaler.update()
+            opt.zero_grad(set_to_none=True)
+            
+        avg_epoch_loss = epoch_loss / len(loader)
+        mean_losses.append(avg_epoch_loss)
+        print(f"Epoch {epoch+1}/{cfg['train']['epochs']} - Loss: {avg_epoch_loss:.4f}")
+        
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    torch.save(lora_state_dict(model), save_path)
+    print(f"Saved LoRA weights to {save_path}")
+    
+    return mean_losses
