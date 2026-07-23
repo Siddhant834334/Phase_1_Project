@@ -24,7 +24,10 @@ def dice_score(pred3d, gt3d, eps=1e-6):
     Returns:
         float: Dice score in [0, 1].
     """
-    pass
+    pre = pred3d.astype(bool)
+    gt3 = gt3d.astype(bool)
+    intersection = (pre & gt3).sum()
+    return float((2*intersection + eps) / (pred3d.sum() + gt3.sum() + eps))
 
 
 def hd95(pred3d, gt3d, spacing):
@@ -53,4 +56,8 @@ def hd95(pred3d, gt3d, spacing):
     Returns:
         float: HD95 in millimetres.
     """
-    pass
+    p = torch.tensor(pred3d.astype(np.uint8), dtype=torch.float32)[None, None]
+    g = torch.tensor(gt3d.astype(np.uint8), dtype=torch.float32)[None, None]
+    sp_zyx = (float(spacing[2]), float(spacing[1]), float(spacing[0]))
+    dist = compute_hausdorff_distance(p, g, percentile=95, spacing=sp_zyx)
+    return float(dist.squeeze())
