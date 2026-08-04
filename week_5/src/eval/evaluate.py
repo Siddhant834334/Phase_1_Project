@@ -2,6 +2,7 @@
 # Dependencies: all previous weeks (weeks 1-4)
 import numpy as np
 from pathlib import Path
+import torch
 
 from src.data.nifti_io import load_volume, apply_hu_window
 from src.data.prompts import bbox_from_mask, best_start_slice
